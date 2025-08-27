@@ -3,7 +3,7 @@ import nibabel as nib
 import numpy as np
 import matplotlib.pylab as plt
 from os.path import join
-from scipy.spatial.distance import cdist    
+from scipy.spatial.distance import cdist
 from scipy.sparse import csgraph
 
 # %% [markdown]
