@@ -119,11 +119,11 @@ def plot_dist(beta_diff, run, ses):
 
     return
 
-def plot_on_brain(anat_img, selected_img, ses, run):
+def plot_on_brain(anat_img, selected_img, save_path):
     display = plotting.plot_anat(anat_img, display_mode="ortho")
     display.add_overlay(selected_img, cmap="autumn", transparency=0.6, threshold=0.5)
     plotting.show()
-    display.savefig(f"anat_with_overlay (active_low_var_voxels_session{ses}_run{run}).png")
+    display.savefig(save_path)
     display.close()
     
     return
@@ -231,6 +231,25 @@ def calculate_weight(param_grid):
     print("Best parameters:", best_params, "with CV loss:", best_score)
     return  best_params, best_score
 
+def select_opt_weight(selected_BOLD_data, weights, selected_voxels):
+    y = selected_BOLD_data.T @ weights
+    p95 = np.percentile(weights, 95)
+    p5 = np.percentile(weights, 5)
+    selected_weights = np.where((weights <= p5) | (weights >= p95))[0]
+
+    weight_volume = np.zeros_like(selected_voxels, dtype=np.float32)
+    weight_volume[selected_voxels.astype(bool)] = weights  # put weights in their voxel positions
+
+    mask = np.zeros_like(weight_volume, dtype=bool)
+    selected_weights = (weights <= p5) | (weights >= p95)
+    mask[selected_voxels.astype(bool)] = selected_weights
+    weight_volume[~mask] = 0
+
+    masked_weights = np.where(weight_volume == 0, np.nan, weight_volume)
+    weight_img = nib.Nifti1Image(masked_weights, affine=anat_img.affine)
+    
+    return weight_img, masked_weights, y
+
 # %% 
 t_thr = 3
 R2_thr = 1.5
@@ -241,6 +260,11 @@ ses = 1
 sub = '04'
 num_trials = 90
 trial_len = 9
+
+param_grid = {
+    "alpha_var":   [0.5, 1.0, 10.0],
+    "alpha_smooth":[0.5, 0.1, 1.0],
+    "alpha_sparse":[0.001, 0.01, 0.1]}
 
 glm_result_path = '/Users/zkavian/Downloads/GLMOutputs2-sub04-ses01/TYPED_FITHRF_GLMDENOISE_RR.npy'
 anat_img = nib.load('/Volumes/McKeownLab/Data_Masterfile/H20-00572_All-Dressed/PRECISIONSTIM_PD_Data_Results/fMRI_preprocessed_data/Rev_pipeline/derivatives/sub-pd004/ses-1/anat/sub-pd004_ses-1_T1w_brain_2mm.nii.gz')
@@ -259,23 +283,16 @@ anat_data = anat_img.get_fdata()
 affine = anat_img.affine
 selected_voxels = nib.Nifti1Image(active_low_var_voxels.astype(np.uint8), affine)
 nib.save(selected_voxels, f'affine_selected_active_low_var_voxels_session{ses}_run{run}.nii.gz')
-plot_on_brain(anat_img, selected_voxels, ses, run)
+save_path = f"anat_with_overlay(active_low_var_voxels_session{ses}_run{run}).png"
+plot_on_brain(anat_img, selected_voxels, save_path)
 
 L_task, L_var, L_smooth, selected_BOLD_data = calculate_matrices(betasmd, selected_voxels, anat_img, affine, BOLD_path_org, num_trials, trial_len)
+best_params, best_score = calculate_weight(param_grid) #a_var, a_smooth, a_sparse
 
+weights = optimize_voxel_weights(L_task, L_var, L_smooth, alpha_var=0.1, alpha_smooth=0.1, alpha_sparse=0.01)
+weight_img, masked_weights, y = select_opt_weight(selected_BOLD_data, weights, selected_voxels)
 
-param_grid = {
-"alpha_var":   [0.1, 1.0, 10.0],
-"alpha_smooth":[0.0, 0.1, 1.0],
-"alpha_sparse":[0.001, 0.01, 0.1]}
+save_path = f"opt_5_percent_weight_on_brain_session{ses}_run{run}.png"
+plot_on_brain(anat_img, weight_img, save_path)
 
-best_params, best_score = calculate_weight(param_grid)
-
-weights = optimize_voxel_weights(
-    L_task, L_var, L_smooth, alpha_var=0.1, alpha_smooth=0.1, alpha_sparse=0.01
-)
-y = selected_BOLD_data.T @ weights
-
-p95 = np.percentile(weights, 95)
-p5 = np.percentile(weights, 5)
-
+finish = 1
