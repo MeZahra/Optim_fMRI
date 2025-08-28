@@ -148,8 +148,10 @@ def calculate_matrices(betasmd, selected_voxels, anat_img, affine, BOLD_path_org
     ## L_var matrix (contains variance of selected voxels)##
     diff_mat = np.diff(selected_BOLD_data_reshape, axis=1)
     diff_mat_flat = diff_mat.reshape(diff_mat.shape[0], -1)
-    C2 = diff_mat_flat @ diff_mat_flat.T
-    L_var = C2 / selected_BOLD_data_reshape.shape[1]
+    L_var = np.cov(diff_mat_flat, bias=False)
+    L_var = (L_var + L_var.T) / 2 + 1e-6 * np.eye(L_var.shape[0])
+    # C2 = diff_mat_flat @ diff_mat_flat.T
+    # L_var = C2 / selected_BOLD_data_reshape.shape[1]
 
 
     ## L_smooth matrix (contains distance beyween selected voxels)##
@@ -168,7 +170,66 @@ def calculate_matrices(betasmd, selected_voxels, anat_img, affine, BOLD_path_org
     D = cdist(selected_world_coords, selected_world_coords)  
     L_smooth = csgraph.laplacian(D)
 
-    return L_task, L_var, L_smooth
+    return L_task, L_var, L_smooth, selected_BOLD_data
+
+def objective(w, L_task, L_var, L_smooth,
+              alpha_var, alpha_smooth, alpha_sparse):
+    """Value of the full loss on a validation set."""
+    quad = (w.T @ L_task @ w
+            + alpha_var   * (w.T @ L_var    @ w)
+            + alpha_smooth * (w.T @ L_smooth @ w))
+    l1 = alpha_sparse * np.sum(np.abs(w))
+    return quad + l1
+
+def optimize_voxel_weights(
+    L_task: np.ndarray,
+    L_var: np.ndarray,
+    L_smooth: np.ndarray,
+    alpha_var: float = 1.0,
+    alpha_smooth: float = 0.1,
+    alpha_sparse: float = 0.01):
+    
+    L_total = np.diag(L_task) + alpha_var * L_var + alpha_smooth * L_smooth
+    w = cp.Variable(L_total.shape[0])
+    objective = cp.Minimize(cp.quad_form(w, L_total) + alpha_sparse * cp.norm1(w))
+    problem = cp.Problem(objective)
+    problem.solve(verbose=True)
+    return w.value
+
+def calculate_weight(param_grid):
+    kf = KFold(n_splits=5, shuffle=True, random_state=0)
+    best_score = np.inf
+    best_params = None
+
+    for a_var, a_smooth, a_sparse in product(*param_grid.values()):
+        fold_scores = []
+        print(f"a_var: {a_var}, a_smooth: {a_smooth}, a_sparse: {a_sparse}")
+        for train_idx, val_idx in kf.split(L_task):
+            L_task_train = L_task[train_idx]
+            L_var_train   = L_var[np.ix_(train_idx, train_idx)]
+            L_smooth_train = L_smooth[np.ix_(train_idx, train_idx)]
+
+            w = optimize_voxel_weights(
+                L_task_train, L_var_train, L_smooth_train,
+                alpha_var=a_var, alpha_smooth=a_smooth, alpha_sparse=a_sparse)
+
+            # validation subsets
+            L_task_val = L_task[val_idx]
+            L_var_val   = L_var[np.ix_(val_idx, val_idx)]
+            L_smooth_val = L_smooth[np.ix_(val_idx, val_idx)]
+
+            fold_scores.append(
+                objective(w, L_task_val, L_var_val, L_smooth_val,
+                        a_var, a_smooth, a_sparse))
+
+        mean_score = np.mean(fold_scores)
+        print(mean_score)
+        if mean_score < best_score:
+            best_score = mean_score
+            best_params = (a_var, a_smooth, a_sparse)
+
+    print("Best parameters:", best_params, "with CV loss:", best_score)
+    return  best_params, best_score
 
 # %% 
 t_thr = 3
@@ -200,5 +261,21 @@ selected_voxels = nib.Nifti1Image(active_low_var_voxels.astype(np.uint8), affine
 nib.save(selected_voxels, f'affine_selected_active_low_var_voxels_session{ses}_run{run}.nii.gz')
 plot_on_brain(anat_img, selected_voxels, ses, run)
 
-L_task, L_var, L_smooth = calculate_matrices(betasmd, selected_voxels, anat_img, affine, BOLD_path_org, num_trials, trial_len)
+L_task, L_var, L_smooth, selected_BOLD_data = calculate_matrices(betasmd, selected_voxels, anat_img, affine, BOLD_path_org, num_trials, trial_len)
+
+
+param_grid = {
+"alpha_var":   [0.1, 1.0, 10.0],
+"alpha_smooth":[0.0, 0.1, 1.0],
+"alpha_sparse":[0.001, 0.01, 0.1]}
+
+best_params, best_score = calculate_weight(param_grid)
+
+weights = optimize_voxel_weights(
+    L_task, L_var, L_smooth, alpha_var=0.1, alpha_smooth=0.1, alpha_sparse=0.01
+)
+y = selected_BOLD_data.T @ weights
+
+p95 = np.percentile(weights, 95)
+p5 = np.percentile(weights, 5)
 
