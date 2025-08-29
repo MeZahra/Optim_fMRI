@@ -88,11 +88,11 @@ def plot_active_voxels(input, ses, run):
         im_ax.set_data(np.rot90(input[:, :, i]))       # axial slices
         return im_sag, im_cor, im_ax
 
-    ani = FuncAnimation(fig, update, frames=range(min(vol.shape)), interval=100, blit=False)
-    fig.tight_layout(rect=[0, 0, 1, 1.5])
+    ani = FuncAnimation(fig, update, frames=range(min(input.shape)), interval=100, blit=False)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    ani.save(filename=f"selected_voxels_session{ses}_run{run}.gif", writer="pillow")
     plt.show()
 
-    ani.save(filename=f"selected_voxels_session{ses}_run{run}.gif", writer="pillow")
     return
 
 def plot_dist(beta_diff, run, ses):
@@ -121,7 +121,7 @@ def plot_dist(beta_diff, run, ses):
 
 def plot_on_brain(anat_img, selected_img, save_path):
     display = plotting.plot_anat(anat_img, display_mode="ortho")
-    display.add_overlay(selected_img, cmap="autumn", transparency=0.6, threshold=0.5)
+    display.add_overlay(selected_img, cmap="autumn", alpha=0.6, threshold=0.5)
     plotting.show()
     display.savefig(save_path)
     display.close()
@@ -167,15 +167,19 @@ def calculate_matrices(betasmd, selected_voxels, anat_img, affine, BOLD_path_org
     world_coords = nib.affines.apply_affine(affine, coords)
     tmp = selected_voxels.astype(bool).reshape(-1)
     selected_world_coords = world_coords[tmp,:]
-    D = cdist(selected_world_coords, selected_world_coords)  
-    L_smooth = csgraph.laplacian(D)
+    D = cdist(selected_world_coords, selected_world_coords)
+    sigma = np.median(D[D>0])
+    W = np.exp(-D**2 / (2*sigma**2))      # similarity
+    np.fill_diagonal(W, 0.0)
+    L_smooth = csgraph.laplacian(W, normed=False)
+    # L_smooth = csgraph.laplacian(D)
 
     return L_task, L_var, L_smooth, selected_BOLD_data
 
-def objective(w, L_task, L_var, L_smooth,
+def objective_func(w, L_task, L_var, L_smooth,
               alpha_var, alpha_smooth, alpha_sparse):
     """Value of the full loss on a validation set."""
-    quad = (w.T @ L_task @ w
+    quad = (w.T @ np.diag(L_task) @ w
             + alpha_var   * (w.T @ L_var    @ w)
             + alpha_smooth * (w.T @ L_smooth @ w))
     l1 = alpha_sparse * np.sum(np.abs(w))
@@ -219,7 +223,7 @@ def calculate_weight(param_grid):
             L_smooth_val = L_smooth[np.ix_(val_idx, val_idx)]
 
             fold_scores.append(
-                objective(w, L_task_val, L_var_val, L_smooth_val,
+                objective_func(w, L_task_val, L_var_val, L_smooth_val,
                         a_var, a_smooth, a_sparse))
 
         mean_score = np.mean(fold_scores)
@@ -231,22 +235,21 @@ def calculate_weight(param_grid):
     print("Best parameters:", best_params, "with CV loss:", best_score)
     return  best_params, best_score
 
-def select_opt_weight(selected_BOLD_data, weights, selected_voxels):
+def select_opt_weight(selected_BOLD_data, weights, selected_voxels, affine):
     y = selected_BOLD_data.T @ weights
     p95 = np.percentile(weights, 95)
     p5 = np.percentile(weights, 5)
-    selected_weights = np.where((weights <= p5) | (weights >= p95))[0]
 
-    weight_volume = np.zeros_like(selected_voxels, dtype=np.float32)
-    weight_volume[selected_voxels.astype(bool)] = weights  # put weights in their voxel positions
+    weight_volume = np.zeros_like(selected_voxels.shape, dtype=np.float32)
+    weight_volume[selected_voxels] = weights  # put weights in their voxel positions
 
-    mask = np.zeros_like(weight_volume, dtype=bool)
+    mask = np.zeros_like(selected_voxels.shape, dtype=bool)
     selected_weights = (weights <= p5) | (weights >= p95)
-    mask[selected_voxels.astype(bool)] = selected_weights
+    mask[selected_voxels] = selected_weights
     weight_volume[~mask] = 0
 
     masked_weights = np.where(weight_volume == 0, np.nan, weight_volume)
-    weight_img = nib.Nifti1Image(masked_weights, affine=anat_img.affine)
+    weight_img = nib.Nifti1Image(masked_weights, affine=affine)
     
     return weight_img, masked_weights, y
 
@@ -266,9 +269,9 @@ param_grid = {
     "alpha_smooth":[0.5, 0.1, 1.0],
     "alpha_sparse":[0.001, 0.01, 0.1]}
 
-glm_result_path = '/Users/zkavian/Downloads/GLMOutputs2-sub04-ses01/TYPED_FITHRF_GLMDENOISE_RR.npy'
-anat_img = nib.load('/Volumes/McKeownLab/Data_Masterfile/H20-00572_All-Dressed/PRECISIONSTIM_PD_Data_Results/fMRI_preprocessed_data/Rev_pipeline/derivatives/sub-pd004/ses-1/anat/sub-pd004_ses-1_T1w_brain_2mm.nii.gz')
-base_path = '/Volumes/McKeownLab/Data_Masterfile/H20-00572_All-Dressed/PRECISIONSTIM_PD_Data_Results/fMRI_preprocessed_data/Rev_pipeline/derivatives'
+glm_result_path = '/mnt/TeamShare/Data_Masterfile/Zahra-Thesis-Data/GLM_single_results/GLMOutputs2-sub04-ses02/TYPED_FITHRF_GLMDENOISE_RR.npy'
+anat_img = nib.load('/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/PRECISIONSTIM_PD_Data_Results/fMRI_preprocessed_data/Rev_pipeline/derivatives/sub-pd004/ses-1/anat/sub-pd004_ses-1_T1w_brain_2mm.nii.gz')
+base_path = '/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/PRECISIONSTIM_PD_Data_Results/fMRI_preprocessed_data/Rev_pipeline/derivatives'
 data_name = f'sub-pd0{sub}_ses-{ses}_run-{run}_task-mv_bold_corrected_smoothed_reg_2mm.nii.gz'
 BOLD_path_org = join(base_path, f'sub-pd0{sub}',f'ses-{ses}','func', data_name)
 
@@ -286,11 +289,16 @@ nib.save(selected_voxels, f'affine_selected_active_low_var_voxels_session{ses}_r
 save_path = f"anat_with_overlay(active_low_var_voxels_session{ses}_run{run}).png"
 plot_on_brain(anat_img, selected_voxels, save_path)
 
-L_task, L_var, L_smooth, selected_BOLD_data = calculate_matrices(betasmd, selected_voxels, anat_img, affine, BOLD_path_org, num_trials, trial_len)
+L_task, L_var, L_smooth, selected_BOLD_data = calculate_matrices(betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, num_trials, trial_len)
 best_params, best_score = calculate_weight(param_grid) #a_var, a_smooth, a_sparse
 
 weights = optimize_voxel_weights(L_task, L_var, L_smooth, alpha_var=0.1, alpha_smooth=0.1, alpha_sparse=0.01)
-weight_img, masked_weights, y = select_opt_weight(selected_BOLD_data, weights, selected_voxels)
+weight_img, masked_weights, y = select_opt_weight(selected_BOLD_data, weights, active_low_var_voxels.astype(bool), affine)
+
+np.save("best_params.npy", best_params)
+np.save("weights.npy", masked_weights)
+np.save("y.npy",y)
+
 
 save_path = f"opt_5_percent_weight_on_brain_session{ses}_run{run}.png"
 plot_on_brain(anat_img, weight_img, save_path)
