@@ -12,12 +12,12 @@ import gc
 
 # %%
 homedir = split(os.getcwd())[0]
-outputdir_glmsingle = join(homedir,'thesis_code/GLMOutputs2-sub04-ses01')
+outputdir_glmsingle = join(homedir,'thesis_code/GLMOutputs2-sub04-ses02')
 
 # %%
 base_path = '/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/PRECISIONSTIM_PD_Data_Results/fMRI_preprocessed_data/Rev_pipeline/derivatives'
 sub = '04'
-ses = '1'
+ses = '2'
 run = '1'
 
 data_name = f'sub-pd0{sub}_ses-{ses}_run-{run}_task-mv_bold_corrected_smoothed_reg_2mm.nii.gz'

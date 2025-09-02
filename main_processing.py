@@ -136,7 +136,8 @@ def calculate_matrices(betasmd, selected_voxels, anat_img, affine, BOLD_path_org
 
     V1 = betasmd[selected_voxels.astype(bool), :][:, trial_indices]
     mean_V1 = np.mean(V1, axis=-1)
-    L_task = 1./np.abs(mean_V1)
+    L_task = np.divide(1., np.abs(mean_V1), out=np.zeros_like(mean_V1), where=mean_V1 != 0)
+    # L_task = 1./np.abs(mean_V1)
 
 
     BOLD_data = nib.load(BOLD_path_org).get_fdata() #(90, 128, 85, 850)
@@ -191,18 +192,19 @@ def objective_func(w, L_task, L_var, L_smooth,
     return quad + l1
 
 def optimize_voxel_weights(
+    L_task: np.ndarray,
+    L_var: np.ndarray,
+    L_smooth: np.ndarray,
     alpha_var: float = 1.0,
     alpha_smooth: float = 0.1,
     alpha_sparse: float = 0.01):
     
-    L_task, L_var, L_smooth, selected_BOLD_data = calculate_matrices(betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, None, trial_len)
     L_total = np.diag(L_task) + alpha_var * L_var + alpha_smooth * L_smooth
     w = cp.Variable(L_total.shape[0])
     objective = cp.Minimize(cp.quad_form(w, L_total) + alpha_sparse * cp.norm1(w))
     problem = cp.Problem(objective)
     problem.solve(verbose=True)
-
-    return w.value, selected_BOLD_data
+    return w.value
 
 def calculate_weight(param_grid, betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, trial_len):
     kf = KFold(n_splits=5, shuffle=True, random_state=0)
@@ -286,9 +288,10 @@ save_path = f"anat_with_overlay(active_low_var_voxels_session{ses}_run{run}).png
 plot_on_brain(anat_img, selected_voxels, save_path)
 
 # L_task, L_var, L_smooth, selected_BOLD_data = calculate_matrices(betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, num_trials, trial_len)
-best_params, best_score = calculate_weight(param_grid, betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, trial_len)
+best_params, best_score, _ = calculate_weight(param_grid, betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, trial_len)
 
-weights, selected_BOLD_data = optimize_voxel_weights(alpha_var=0.1, alpha_smooth=0.1, alpha_sparse=0.01)
+L_task, L_var, L_smooth, selected_BOLD_data = calculate_matrices(betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, None, trial_len)
+weights = optimize_voxel_weights(L_task, L_var, L_smooth, alpha_var=0.1, alpha_smooth=0.1, alpha_sparse=0.01)
 weight_img, masked_weights, y = select_opt_weight(selected_BOLD_data, weights, active_low_var_voxels.astype(bool), affine)
 
 np.save("best_params.npy", best_params)
