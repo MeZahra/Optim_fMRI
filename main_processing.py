@@ -13,6 +13,15 @@ from sklearn.model_selection import KFold
 from matplotlib.animation import FuncAnimation
 from nilearn import plotting, datasets, image
 
+import os, sys
+
+def clear_console():
+    if os.name == "nt":
+        os.system("cls")                     # Windows
+    else:
+        # Try tput (nicer), fall back to ANSI reset
+        os.system("tput reset 2>/dev/null || printf '\033c'")
+
 
 def find_active_voxels(glm_results, run, t_thr, R2_thr):
     if run == 1:
@@ -40,6 +49,7 @@ def find_active_voxels(glm_results, run, t_thr, R2_thr):
     mask_pos = base & (mu_vol > 0)
     mask_neg = base & (mu_vol < 0)
 
+    clear_console()
     print(f"Number of Active Voxels {np.sum(base)} from Total Voxels: {V}")
     print(f"Number of Positively Active Voxels {np.sum(mask_pos)}, Number of Negatively Active Voxels {np.sum(mask_neg)}")
     
@@ -121,7 +131,7 @@ def plot_dist(beta_diff, run, ses):
 
 def plot_on_brain(anat_img, selected_img, save_path):
     display = plotting.plot_anat(anat_img, display_mode="ortho")
-    display.add_overlay(selected_img, cmap="autumn", alpha=0.6, threshold=0.5)
+    display.add_overlay(selected_img, cmap="jet", transparency=0.6, threshold=0.5)
     plotting.show()
     display.savefig(save_path)
     display.close()
@@ -149,7 +159,10 @@ def calculate_matrices(betasmd, selected_voxels, anat_img, affine, BOLD_path_org
         start += trial_len
         if start == 270 or start == 560:
             start += 20
+
+    print(selected_BOLD_data_reshape.shape)
     selected_BOLD_data_subset = selected_BOLD_data_reshape[:, trial_indices, :]
+    print(selected_BOLD_data_subset.shape)
 
     ## L_var matrix (contains variance of selected voxels)##
     diff_mat = np.diff(selected_BOLD_data_subset, axis=1)
@@ -183,53 +196,81 @@ def calculate_matrices(betasmd, selected_voxels, anat_img, affine, BOLD_path_org
     return L_task, L_var, L_smooth, selected_BOLD_data_subset.reshape(selected_BOLD_data_subset.shape[0], -1)
 
 def objective_func(w, L_task, L_var, L_smooth,
-              alpha_var, alpha_smooth, alpha_sparse):
+              alpha_var, alpha_smooth):
     """Value of the full loss on a validation set."""
     quad = (w.T @ np.diag(L_task) @ w
             + alpha_var   * (w.T @ L_var    @ w)
             + alpha_smooth * (w.T @ L_smooth @ w))
-    l1 = alpha_sparse * np.sum(np.abs(w))
-    return quad + l1
+    # l1 = alpha_sparse * np.sum(np.abs(w))
+    return quad
+
+# def optimize_voxel_weights(
+#     L_task: np.ndarray,
+#     L_var: np.ndarray,
+#     L_smooth: np.ndarray,
+#     alpha_var: float = 1.0,
+#     alpha_smooth: float = 0.1,
+#     alpha_sparse: float = 0.01):
+    
+#     L_total = np.diag(L_task) + alpha_var * L_var + alpha_smooth * L_smooth
+#     n = L_total.shape[0]
+#     L_total = 0.5*(L_total + L_total.T) + 1e-8*np.eye(n)
+#     w = cp.Variable(n, nonneg=True)
+#     objective = cp.Minimize(cp.quad_form(w, L_total) + alpha_sparse * cp.norm1(w))
+#     constraints = [cp.sum(w) == 1]
+#     problem = cp.Problem(objective, constraints)
+#     problem.solve(verbose=True)
+#     return w.value
 
 def optimize_voxel_weights(
     L_task: np.ndarray,
     L_var: np.ndarray,
     L_smooth: np.ndarray,
     alpha_var: float = 1.0,
-    alpha_smooth: float = 0.1,
-    alpha_sparse: float = 0.01):
+    alpha_smooth: float = 0.1):
     
     L_total = np.diag(L_task) + alpha_var * L_var + alpha_smooth * L_smooth
-    w = cp.Variable(L_total.shape[0])
-    objective = cp.Minimize(cp.quad_form(w, L_total) + alpha_sparse * cp.norm1(w))
-    problem = cp.Problem(objective)
-    problem.solve(verbose=True)
+    n = L_total.shape[0]
+    L_total = 0.5*(L_total + L_total.T) + 1e-8*np.eye(n)
+    w = cp.Variable(n, nonneg=True)
+    constraints = [cp.sum(w) == 1]
+    
+    # objective = cp.Minimize(cp.quad_form(w, L_total) + alpha_sparse * cp.norm1(w))
+    objective = cp.Minimize(cp.quad_form(w, L_total))
+    problem = cp.Problem(objective, constraints)
+    problem.solve(solver=cp.OSQP, verbose=True)
     return w.value
 
 def calculate_weight(param_grid, betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, trial_len):
-    kf = KFold(n_splits=5, shuffle=True, random_state=0)
+    kf = KFold(n_splits=2, shuffle=True, random_state=0)
     best_score = np.inf
     best_params = None
     num_trials = betasmd.shape[-1]
 
-    for a_var, a_smooth, a_sparse in product(*param_grid.values()):
+    for a_var, a_smooth in product(*param_grid.values()):
         fold_scores = []
-        print(f"a_var: {a_var}, a_smooth: {a_smooth}, a_sparse: {a_sparse}")
+        print(f"a_var: {a_var}, a_smooth: {a_smooth}")
+        count = 1
 
         for train_idx, val_idx in kf.split(np.arange(num_trials)):
+            clear_console()
+            print(f"k-fold num: {count}")
             L_task_train, L_var_train, L_smooth_train, _ = calculate_matrices(betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, train_idx, trial_len)
-            w = optimize_voxel_weights(L_task_train, L_var_train, L_smooth_train, alpha_var=a_var, alpha_smooth=a_smooth, alpha_sparse=a_sparse)
+            w = optimize_voxel_weights(L_task_train, L_var_train, L_smooth_train, alpha_var=a_var, alpha_smooth=a_smooth)
 
             L_task_val, L_var_val, L_smooth_val, _ = calculate_matrices(betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, val_idx, trial_len)
 
-            fold_scores.append(objective_func(w, L_task_val, L_var_val, L_smooth_val, a_var, a_smooth, a_sparse))
+            fold_scores.append(objective_func(w, L_task_val, L_var_val, L_smooth_val, a_var, a_smooth))
+            print(f"fold_scores: {fold_scores}")
+            count += 1
 
         mean_score = np.mean(fold_scores)
         print(mean_score)
         if mean_score < best_score:
             best_score = mean_score
-            best_params = (a_var, a_smooth, a_sparse)
+            best_params = (a_var, a_smooth)
 
+    clear_console()
     print("Best parameters:", best_params, "with CV loss:", best_score)
     return best_params, best_score
 
@@ -238,10 +279,10 @@ def select_opt_weight(selected_BOLD_data, weights, selected_voxels, affine):
     p95 = np.percentile(weights, 95)
     p5 = np.percentile(weights, 5)
 
-    weight_volume = np.zeros_like(selected_voxels.shape, dtype=np.float32)
+    weight_volume = np.zeros(selected_voxels.shape, dtype=np.float32)
     weight_volume[selected_voxels] = weights  # put weights in their voxel positions
 
-    mask = np.zeros_like(selected_voxels.shape, dtype=bool)
+    mask = np.zeros(selected_voxels.shape, dtype=bool)
     selected_weights = (weights <= p5) | (weights >= p95)
     mask[selected_voxels] = selected_weights
     weight_volume[~mask] = 0
@@ -262,13 +303,17 @@ sub = '04'
 num_trials = 90
 trial_len = 9
 
-param_grid = {
-    "alpha_var":   [0.5, 1.0, 10.0],
-    "alpha_smooth":[0.5, 0.1, 1.0],
-    "alpha_sparse":[0.001, 0.01, 0.1]}
+# param_grid = {
+#     "alpha_var":   [0.5, 1.0, 10.0],
+#     "alpha_smooth":[0.5, 0.1, 1.0],
+#     "alpha_sparse":[0.001, 0.01, 0.1]}
 
-glm_result_path = '/mnt/TeamShare/Data_Masterfile/Zahra-Thesis-Data/GLM_single_results/GLMOutputs2-sub04-ses02/TYPED_FITHRF_GLMDENOISE_RR.npy'
-anat_img = nib.load('/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/PRECISIONSTIM_PD_Data_Results/fMRI_preprocessed_data/Rev_pipeline/derivatives/sub-pd004/ses-1/anat/sub-pd004_ses-1_T1w_brain_2mm.nii.gz')
+param_grid = {
+    "alpha_var":   [0.5, 1.0],
+    "alpha_smooth":[0.5, 1.0]}
+
+glm_result_path = '/mnt/TeamShare/Data_Masterfile/Zahra-Thesis-Data/Master_Thesis_Files/GLM_single_results/GLMOutputs2-sub04-ses02/TYPED_FITHRF_GLMDENOISE_RR.npy'
+anat_img = nib.load(f'/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/PRECISIONSTIM_PD_Data_Results/fMRI_preprocessed_data/Rev_pipeline/derivatives/sub-pd0{sub}/ses-{ses}/anat/sub-pd0{sub}_ses-{ses}_T1w_brain_2mm.nii.gz')
 base_path = '/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/PRECISIONSTIM_PD_Data_Results/fMRI_preprocessed_data/Rev_pipeline/derivatives'
 data_name = f'sub-pd0{sub}_ses-{ses}_run-{run}_task-mv_bold_corrected_smoothed_reg_2mm.nii.gz'
 BOLD_path_org = join(base_path, f'sub-pd0{sub}',f'ses-{ses}','func', data_name)
@@ -288,18 +333,50 @@ save_path = f"anat_with_overlay(active_low_var_voxels_session{ses}_run{run}).png
 plot_on_brain(anat_img, selected_voxels, save_path)
 
 # L_task, L_var, L_smooth, selected_BOLD_data = calculate_matrices(betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, num_trials, trial_len)
-best_params, best_score, _ = calculate_weight(param_grid, betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, trial_len)
+best_params, best_score = calculate_weight(param_grid, betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, trial_len)
 
 L_task, L_var, L_smooth, selected_BOLD_data = calculate_matrices(betasmd, active_low_var_voxels, anat_img, affine, BOLD_path_org, None, trial_len)
-weights = optimize_voxel_weights(L_task, L_var, L_smooth, alpha_var=0.1, alpha_smooth=0.1, alpha_sparse=0.01)
+weights = optimize_voxel_weights(L_task, L_var, L_smooth, alpha_var=best_params[0], alpha_smooth=best_params[1])
 weight_img, masked_weights, y = select_opt_weight(selected_BOLD_data, weights, active_low_var_voxels.astype(bool), affine)
+print(y.shape)
 
-np.save("best_params.npy", best_params)
-np.save("weights.npy", masked_weights)
-np.save("y.npy",y)
+np.save(f"best_params_session{ses}_run{run}.npy", best_params)
+np.save(f"masked_weights_session{ses}_run{run}.npy", masked_weights)
+np.save(f"all_weights_session{ses}_run{run}.nii", weight_img)
+np.save(f"reconstructed_sig_session{ses}_run{run}.npy",y)
 
 
 save_path = f"opt_5_percent_weight_on_brain_session{ses}_run{run}.png"
 plot_on_brain(anat_img, weight_img, save_path)
 
-finish = 1
+#########################################################
+import numpy as np
+import nibabel as nib
+from nilearn.plotting import plot_stat_map
+
+# Load the weights
+weights = np.load('/home/zkavian/thesis_code_git/masked_weights_session1_run1.npy')
+
+# Load the anatomy
+anat_img = nib.load(
+    '/mnt/TeamShare/Data_Masterfile/H20-00572_All-Dressed/'
+    'PRECISIONSTIM_PD_Data_Results/fMRI_preprocessed_data/'
+    'Rev_pipeline/derivatives/sub-pd004/ses-1/anat/'
+    'sub-pd004_ses-1_T1w_brain_2mm.nii.gz'
+)
+affine = anat_img.affine
+
+# Create a NIfTI image from the weights
+weight_img = nib.Nifti1Image(weights, affine=affine)
+
+# Replace NaNs with 0
+data = weight_img.get_fdata()
+data[np.isnan(data)] = 0
+
+# Make a new NIfTI with cleaned data
+clean_img = nib.Nifti1Image(data, affine=affine)
+
+# Plot
+plot_stat_map(clean_img, bg_img=anat_img, display_mode='ortho', title='Weights Map')
+
+
