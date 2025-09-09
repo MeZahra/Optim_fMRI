@@ -5,10 +5,10 @@
 !*.py
 !*.ipynb
 
-*.GLMsingle
-
 # keep tracking these two
+!Optim_fMRI_new/
 !Optim_fMRI_new/**
+!Optim_fMRI_old/
 !Optim_fMRI_old/**
 
 
