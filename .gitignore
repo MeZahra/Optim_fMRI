@@ -7,5 +7,10 @@
 
 *.GLMsingle
 
+# keep tracking these two
+!Optim_fMRI_new/**
+!Optim_fMRI_old/**
+
+
 # Also keep the .gitignore file itself
 !.gitignore
